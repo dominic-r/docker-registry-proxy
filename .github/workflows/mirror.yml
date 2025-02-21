@@ -1,0 +1,30 @@
+name: Mirror Repository
+
+on:
+ schedule:
+   - cron: '0 */6 * * *'
+ workflow_dispatch:
+
+jobs:
+ mirror:
+   runs-on: ubuntu-latest
+   if: github.repository == 'dominic-r/docker-registry-proxy'
+   steps:
+     - uses: actions/checkout@v4
+       with:
+         fetch-depth: 0
+     - uses: 1password/install-cli-action@v1
+     - uses: 1password/load-secrets-action@v2
+       with:
+         export-env: true
+       env:
+         OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+         GH_TOKEN: op://SWSHomelab-Central/ght-org-personal-repo-rw-pub-priv/credential
+     - run: |
+         git clone --bare https://github.com/dominic-r/docker-registry-proxy.git
+         cd ak-gendoc.git
+         git config --bool remote.origin.mirror false
+         git config remote.origin.fetch +refs/heads/main:refs/heads/main
+         git remote set-url --push origin https://${{ env.GH_TOKEN }}@github.com/sdko-org/docker-registry-proxy-mirror.git
+         git fetch origin main
+         git push origin main -f
