@@ -22,7 +22,7 @@ jobs:
          GH_TOKEN: op://SWSHomelab-Central/ght-org-personal-repo-rw-pub-priv/credential
      - run: |
          git clone --bare https://github.com/dominic-r/docker-registry-proxy.git
-         cd ak-gendoc.git
+         cd docker-registry-proxy.git
          git config --bool remote.origin.mirror false
          git config remote.origin.fetch +refs/heads/main:refs/heads/main
          git remote set-url --push origin https://${{ env.GH_TOKEN }}@github.com/sdko-org/docker-registry-proxy-mirror.git
