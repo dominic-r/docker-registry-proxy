@@ -1,0 +1,11 @@
+#
+# Development docker-compose file. For production, see production repository #3.
+#
+
+services:
+  registry-proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
