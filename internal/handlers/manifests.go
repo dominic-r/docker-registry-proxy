@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -74,21 +75,24 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 		return
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-	hash := sha256.Sum256(body)
-	digest := "sha256:" + hex.EncodeToString(hash[:])
-
-	if err := h.storage.Put(ctx, cacheKey, body, digest, h.cfg.CacheTTL); err != nil {
-		http.Error(w, "Caching failed", http.StatusInternalServerError)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading manifest body: %v", err)
+		http.Error(w, "Failed to process manifest", http.StatusInternalServerError)
 		return
 	}
 
-	digestKey := fmt.Sprintf("manifests/%s/%s", image, digest)
-	h.storage.Put(ctx, digestKey, body, digest, 0)
+	digest := resp.Header.Get("Docker-Content-Digest")
+	if digest == "" {
+		hash := sha256.Sum256(body)
+		digest = "sha256:" + hex.EncodeToString(hash[:])
+	}
 
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.Header().Set("Docker-Content-Digest", digest)
-	w.Write(body)
+	if authHeader := resp.Header.Get("WWW-Authenticate"); authHeader != "" {
+		w.Header().Set("WWW-Authenticate", authHeader)
+	}
 }
 
 func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image, digest string) {

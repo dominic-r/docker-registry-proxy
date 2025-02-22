@@ -3,7 +3,9 @@ package storage
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -12,21 +14,25 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/sdko-org/registry-proxy/internal/config"
+	"github.com/sdko-org/registry-proxy/internal/models"
+	"gorm.io/gorm"
 )
 
 type Storage interface {
 	Get(ctx context.Context, key string) ([]byte, string, error)
 	Put(ctx context.Context, key string, content []byte, digest string, ttl time.Duration) error
 	PutStream(ctx context.Context, key string, content io.Reader, digest string, ttl time.Duration) error
+	Delete(ctx context.Context, key string) error
 }
 
 type S3Storage struct {
 	client   *s3.S3
 	uploader *s3manager.Uploader
 	cfg      *config.Config
+	db       *gorm.DB
 }
 
-func NewS3Storage(cfg *config.Config) *S3Storage {
+func NewS3Storage(cfg *config.Config, db *gorm.DB) *S3Storage {
 	awsConfig := &aws.Config{
 		Region:           aws.String(cfg.S3Region),
 		Credentials:      credentials.NewStaticCredentials(cfg.S3AccessKey, cfg.S3SecretKey, ""),
@@ -43,6 +49,7 @@ func NewS3Storage(cfg *config.Config) *S3Storage {
 		client:   s3.New(sess),
 		uploader: s3manager.NewUploader(sess),
 		cfg:      cfg,
+		db:       db,
 	}
 }
 
@@ -74,7 +81,24 @@ func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest 
 		},
 	})
 
-	return err
+	if err != nil {
+		return fmt.Errorf("s3 upload failed: %w", err)
+	}
+
+	entry := models.CacheEntry{
+		Key:        key,
+		Digest:     digest,
+		StoredAt:   time.Now(),
+		ExpiresAt:  time.Now().Add(ttl),
+		LastAccess: time.Now(),
+		SizeBytes:  int64(len(content)),
+	}
+
+	if err := s.db.WithContext(ctx).Save(&entry).Error; err != nil {
+		return fmt.Errorf("failed to save cache entry: %w", err)
+	}
+
+	return nil
 }
 
 func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader, digest string, ttl time.Duration) error {
@@ -87,6 +111,19 @@ func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader
 			"Docker-Content-Digest": aws.String(digest),
 		},
 	})
+
+	return err
+}
+
+func (s *S3Storage) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObjectWithContext(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.cfg.S3Bucket),
+		Key:    aws.String(key),
+	})
+
+	if dbErr := s.db.Where("key = ?", key).Delete(&models.CacheEntry{}).Error; dbErr != nil {
+		log.Printf("Failed to delete cache entry from DB: %v", dbErr)
+	}
 
 	return err
 }

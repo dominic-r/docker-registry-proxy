@@ -37,7 +37,16 @@ func (c *Client) GetManifest(ctx context.Context, image, reference string) (*htt
 
 func (c *Client) GetBlob(ctx context.Context, image, digest string) (*http.Response, error) {
 	url := fmt.Sprintf("https://registry-1.docker.io/v2/%s/blobs/%s", normalizeImageName(image), digest)
-	return c.httpClient.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.config.DockerHubUser != "" && c.config.DockerHubPassword != "" {
+		req.SetBasicAuth(c.config.DockerHubUser, c.config.DockerHubPassword)
+	}
+
+	return c.httpClient.Do(req.WithContext(ctx))
 }
 
 func normalizeImageName(image string) string {

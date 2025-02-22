@@ -17,6 +17,12 @@ type Config struct {
 	CacheTTL          time.Duration
 	RateLimit         int
 	RateLimitWindow   time.Duration
+	PostgresUser      string
+	PostgresPassword  string
+	PostgresHost      string
+	PostgresPort      string
+	PostgresDatabase  string
+	PostgresSSLMode   string
 }
 
 func Load() *Config {
@@ -31,6 +37,12 @@ func Load() *Config {
 		CacheTTL:          getEnvDuration("CACHE_TTL", 12*time.Hour),
 		RateLimit:         getEnvInt("RATE_LIMIT", 100),
 		RateLimitWindow:   getEnvDuration("RATE_LIMIT_WINDOW", time.Minute),
+		PostgresUser:      getEnv("POSTGRES_USER", "registry"),
+		PostgresPassword:  getEnv("POSTGRES_PASSWORD", ""),
+		PostgresHost:      getEnv("POSTGRES_HOST", "localhost"),
+		PostgresPort:      getEnv("POSTGRES_PORT", "5432"),
+		PostgresDatabase:  getEnv("POSTGRES_DATABASE", "registry_proxy"),
+		PostgresSSLMode:   getEnv("POSTGRES_SSL_MODE", "disable"),
 	}
 }
 
