@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
@@ -56,8 +57,12 @@ func NewS3Storage(cfg *config.Config, db *gorm.DB) *S3Storage {
 
 func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, error) {
 	var entry models.CacheEntry
-	if err := s.db.WithContext(ctx).Where("key = ?", key).First(&entry).Error; err != nil {
-		return nil, "", err
+	result := s.db.WithContext(ctx).Where("key = ?", key).First(&entry)
+	if result.Error != nil {
+		if result.Error == gorm.ErrRecordNotFound {
+			return nil, "", fmt.Errorf("cache miss")
+		}
+		return nil, "", fmt.Errorf("database error: %w", result.Error)
 	}
 
 	if time.Now().After(entry.ExpiresAt) {
@@ -72,13 +77,16 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, error)
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil, "", err
+		if aerr, ok := err.(awserr.Error); ok {
+			log.Printf("S3 error: %s - %s", aerr.Code(), aerr.Message())
+		}
+		return nil, "", fmt.Errorf("s3 get failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	content, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("failed to read s3 object: %w", err)
 	}
 
 	digest := aws.StringValue(resp.Metadata["Docker-Content-Digest"])
@@ -102,6 +110,9 @@ func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest 
 	})
 
 	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			log.Printf("S3 upload error: %s - %s", aerr.Code(), aerr.Message())
+		}
 		return fmt.Errorf("s3 upload failed: %w", err)
 	}
 

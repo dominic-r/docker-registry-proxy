@@ -26,24 +26,38 @@ type Config struct {
 }
 
 func Load() *Config {
-	return &Config{
+	cfg := &Config{
 		S3Bucket:          getEnv("S3_BUCKET", "registry-cache"),
 		S3Region:          getEnv("AWS_REGION", "us-east-1"),
-		S3Endpoint:        getEnv("S3_ENDPOINT", ""),
-		S3AccessKey:       getEnv("AWS_ACCESS_KEY_ID", ""),
-		S3SecretKey:       getEnv("AWS_SECRET_ACCESS_KEY", ""),
-		DockerHubUser:     os.Getenv("DOCKERHUB_USER"),
-		DockerHubPassword: os.Getenv("DOCKERHUB_PASSWORD"),
+		S3Endpoint:        mustGetEnv("S3_ENDPOINT"),
+		S3AccessKey:       mustGetEnv("AWS_ACCESS_KEY_ID"),
+		S3SecretKey:       mustGetEnv("AWS_SECRET_ACCESS_KEY"),
+		DockerHubUser:     mustGetEnv("DOCKERHUB_USER"),
+		DockerHubPassword: mustGetEnv("DOCKERHUB_PASSWORD"),
 		CacheTTL:          getEnvDuration("CACHE_TTL", 12*time.Hour),
 		RateLimit:         getEnvInt("RATE_LIMIT", 100),
 		RateLimitWindow:   getEnvDuration("RATE_LIMIT_WINDOW", time.Minute),
 		PostgresUser:      getEnv("POSTGRES_USER", "registry"),
-		PostgresPassword:  getEnv("POSTGRES_PASSWORD", ""),
+		PostgresPassword:  getEnv("POSTGRES_PASSWORD", "password"),
 		PostgresHost:      getEnv("POSTGRES_HOST", "localhost"),
 		PostgresPort:      getEnv("POSTGRES_PORT", "5432"),
 		PostgresDatabase:  getEnv("POSTGRES_DATABASE", "registry_proxy"),
 		PostgresSSLMode:   getEnv("POSTGRES_SSL_MODE", "disable"),
 	}
+
+	if cfg.S3AccessKey == "" || cfg.S3SecretKey == "" || cfg.S3Endpoint == "" || cfg.DockerHubUser == "" || cfg.DockerHubPassword == "" {
+		panic("AWS credentials must be provided")
+	}
+
+	return cfg
+}
+
+func mustGetEnv(key string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		panic("Missing required environment variable: " + key)
+	}
+	return value
 }
 
 func getEnv(key, defaultValue string) string {
