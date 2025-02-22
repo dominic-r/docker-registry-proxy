@@ -56,7 +56,11 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 	ctx := r.Context()
 	cacheKey := fmt.Sprintf("manifests/%s/%s", image, reference)
 
-	if content, digest, err := h.storage.Get(ctx, cacheKey); err == nil {
+	content, digest, err := h.storage.Get(ctx, cacheKey)
+	if err == nil {
+		if err := h.storage.UpdateLastAccess(ctx, cacheKey); err != nil {
+			log.Printf("Failed to update last access time: %v", err)
+		}
 		w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
 		w.Header().Set("Docker-Content-Digest", digest)
 		w.Write(content)
@@ -71,7 +75,12 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		http.Error(w, "Failed to fetch manifest", resp.StatusCode)
+		headers := w.Header()
+		for k, v := range resp.Header {
+			headers[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 		return
 	}
 
@@ -82,24 +91,31 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 		return
 	}
 
-	digest := resp.Header.Get("Docker-Content-Digest")
+	digest = resp.Header.Get("Docker-Content-Digest")
 	if digest == "" {
 		hash := sha256.Sum256(body)
 		digest = "sha256:" + hex.EncodeToString(hash[:])
 	}
 
+	if err := h.storage.Put(ctx, cacheKey, body, digest, h.cfg.CacheTTL); err != nil {
+		log.Printf("Failed to cache manifest: %v", err)
+	}
+
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.Header().Set("Docker-Content-Digest", digest)
-	if authHeader := resp.Header.Get("WWW-Authenticate"); authHeader != "" {
-		w.Header().Set("WWW-Authenticate", authHeader)
-	}
+	w.WriteHeader(resp.StatusCode)
+	w.Write(body)
 }
 
 func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image, digest string) {
 	ctx := r.Context()
 	cacheKey := fmt.Sprintf("blobs/%s/%s", image, digest)
 
-	if content, _, err := h.storage.Get(ctx, cacheKey); err == nil {
+	content, _, err := h.storage.Get(ctx, cacheKey)
+	if err == nil {
+		if err := h.storage.UpdateLastAccess(ctx, cacheKey); err != nil {
+			log.Printf("Failed to update last access time: %v", err)
+		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Write(content)
 		return
@@ -113,7 +129,12 @@ func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		http.Error(w, "Blob not found", http.StatusNotFound)
+		headers := w.Header()
+		for k, v := range resp.Header {
+			headers[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 		return
 	}
 

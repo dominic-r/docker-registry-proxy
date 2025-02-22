@@ -50,8 +50,8 @@ func (c *Client) GetBlob(ctx context.Context, image, digest string) (*http.Respo
 }
 
 func normalizeImageName(image string) string {
-	if strings.HasPrefix(image, "library/") {
-		return strings.TrimPrefix(image, "library/")
+	if !strings.Contains(image, "/") {
+		return "library/" + image
 	}
 	return image
 }
