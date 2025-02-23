@@ -12,6 +12,7 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+    if: github.repository == 'dominic-r/docker-registry-proxy'
     permissions:
       security-events: write
       packages: read
