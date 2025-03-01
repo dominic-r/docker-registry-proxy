@@ -139,7 +139,7 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 	w.Write(body)
 }
 
-func (h *ProxyHandler) handleBlob(w http.ResponseWriter, image, digest string) {
+func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image, digest string) {
 	if !validDigestRegex.MatchString(digest) {
 		http.Error(w, "Invalid digest format", http.StatusBadRequest)
 		return
