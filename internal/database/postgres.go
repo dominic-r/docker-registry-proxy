@@ -56,7 +56,7 @@ func NewPostgresDB(logger *logrus.Logger, cfg PostgresConfig) (*gorm.DB, error) 
 		return nil, fmt.Errorf("database connection failed: %w", err)
 	}
 
-	if err := db.AutoMigrate(&models.AccessLog{}, &models.CacheEntry{}); err != nil {
+	if err := db.AutoMigrate(&models.AccessLog{}, &models.RegistryCache{}, &models.TagCache{}); err != nil {
 		log.WithError(err).Error("Database migration failed")
 		return nil, fmt.Errorf("database migration failed: %w", err)
 	}

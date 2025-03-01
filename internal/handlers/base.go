@@ -31,7 +31,7 @@ type ProxyHandler struct {
 	db          *gorm.DB
 }
 
-func NewProxyHandler(logger *logrus.Logger, cfg *config.Config, storage storage.Storage, dhClient *dockerhub.Client) *ProxyHandler {
+func NewProxyHandler(logger *logrus.Logger, cfg *config.Config, storage storage.Storage, dhClient *dockerhub.Client, db *gorm.DB) *ProxyHandler {
 	if err := os.MkdirAll(cfg.TempDir, 0700); err != nil {
 		logger.Fatal(err)
 	}
@@ -47,6 +47,7 @@ func NewProxyHandler(logger *logrus.Logger, cfg *config.Config, storage storage.
 		cfg:      cfg,
 		storage:  storage,
 		dhClient: dhClient,
+		db:       db,
 		log:      logger.WithField("component", "proxy_handler"),
 		tempDir:  cfg.TempDir,
 	}
