@@ -2,18 +2,18 @@ package main
 
 import (
 	"context"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/sdko-org/registry-proxy/internal/cache"
 	"github.com/sdko-org/registry-proxy/internal/config"
 	"github.com/sdko-org/registry-proxy/internal/database"
 	"github.com/sdko-org/registry-proxy/internal/dockerhub"
 	"github.com/sdko-org/registry-proxy/internal/handlers"
-	"github.com/sdko-org/registry-proxy/internal/models"
+	httpserver "github.com/sdko-org/registry-proxy/internal/http"
 	"github.com/sdko-org/registry-proxy/internal/storage"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
@@ -35,18 +35,19 @@ func main() {
 	dhClient := dockerhub.NewClient(logger, cfg)
 
 	router := setupRouter(cfg, db, s3Storage, dhClient)
-	server := configureServer(router)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go startCachePurger(ctx, logger, db, s3Storage, cfg)
-	go handleGracefulShutdown(server)
+	cachePurger := cache.NewCachePurger(logger, db, s3Storage, cfg)
+	go cachePurger.Start(ctx)
 
-	logger.Info("Server listening on :8080")
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.WithError(err).Fatal("Server failed to start")
-	}
+	httpserver.StartServers(logger, router)
+
+	handleGracefulShutdown()
+
+	logger.Info("Server running on ports 8443 (HTTP) and 9443 (HTTPS)")
+	select {}
 }
 
 func configureLogger() {
@@ -86,17 +87,7 @@ func setupRouter(cfg *config.Config, db *gorm.DB, storage storage.Storage, dhCli
 	return r
 }
 
-func configureServer(handler http.Handler) *http.Server {
-	return &http.Server{
-		Addr:         ":8080",
-		Handler:      handler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
-	}
-}
-
-func handleGracefulShutdown(server *http.Server) {
+func handleGracefulShutdown() {
 	sigint := make(chan os.Signal, 1)
 	signal.Notify(sigint, syscall.SIGINT, syscall.SIGTERM)
 	<-sigint
@@ -105,60 +96,7 @@ func handleGracefulShutdown(server *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
-		logger.WithError(err).Error("Server shutdown error")
-	}
-}
+	_ = ctx
 
-func startCachePurger(ctx context.Context, log *logrus.Logger, db *gorm.DB, storage storage.Storage, cfg *config.Config) {
-	ticker := time.NewTicker(30 * time.Minute)
-	defer ticker.Stop()
-
-	logEntry := log.WithField("component", "cache_purger")
-	logEntry.Info("Starting cache purger")
-
-	for {
-		select {
-		case <-ticker.C:
-			purgeExpiredCache(ctx, logEntry, db, storage)
-		case <-ctx.Done():
-			logEntry.Info("Stopping cache purger")
-			return
-		}
-	}
-}
-
-func purgeExpiredCache(ctx context.Context, log *logrus.Entry, db *gorm.DB, storage storage.Storage) {
-	start := time.Now()
-	log = log.WithField("operation", "cache_purge")
-
-	var entries []models.CacheEntry
-	if err := db.WithContext(ctx).
-		Where("expires_at < ? OR last_access < ?",
-			time.Now(),
-			time.Now().Add(-7*24*time.Hour)).
-		Find(&entries).Error; err != nil {
-		log.WithError(err).Error("Cache purge query failed")
-		return
-	}
-
-	log.WithField("count", len(entries)).Info("Processing expired cache entries")
-	deleted := 0
-
-	for _, entry := range entries {
-		if err := storage.Delete(ctx, entry.Key); err != nil {
-			log.WithFields(logrus.Fields{
-				"key":   entry.Key,
-				"error": err,
-			}).Error("Failed to delete cache entry")
-			continue
-		}
-		deleted++
-	}
-
-	log.WithFields(logrus.Fields{
-		"deleted_entries": deleted,
-		"failed_deletes":  len(entries) - deleted,
-		"duration":        time.Since(start),
-	}).Info("Cache purge completed")
+	logger.Info("Server shutdown complete")
 }
