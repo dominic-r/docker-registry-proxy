@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,7 +78,7 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, string
 			log.Debug("Waiting for active upload completion")
 			for i := 0; i < 10; i++ {
 				time.Sleep(500 * time.Millisecond)
-				var entry models.CacheEntry
+				var entry models.RegistryCache
 				if err := s.db.WithContext(ctx).Where("key = ?", key).First(&entry).Error; err == nil {
 					break
 				}
@@ -87,7 +88,7 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, string
 		}
 	}
 
-	var entry models.CacheEntry
+	var entry models.RegistryCache
 	if err := s.db.WithContext(ctx).Where("key = ?", key).First(&entry).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Debug("Cache miss")
@@ -95,6 +96,11 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, string
 		}
 		log.WithError(err).Error("Database query failed")
 		return nil, "", "", fmt.Errorf("database error: %w", err)
+	}
+
+	if entry.Type == "tag" && time.Since(entry.LastModified) > s.cfg.TagCacheTTL/2 {
+		log.Debug("Stale tag cache")
+		return nil, "", "", fmt.Errorf("stale tag cache")
 	}
 
 	if time.Now().After(entry.ExpiresAt) {
@@ -143,7 +149,7 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, string
 		"media_type": mediaType,
 	}).Debug("Cache hit")
 
-	if err := s.db.WithContext(ctx).Model(&models.CacheEntry{}).
+	if err := s.db.WithContext(ctx).Model(&models.RegistryCache{}).
 		Where("key = ?", key).
 		Update("last_access", time.Now()).Error; err != nil {
 		log.WithError(err).Warn("Failed to update last access time")
@@ -161,6 +167,19 @@ func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest,
 		"media_type": mediaType,
 	})
 
+	cacheType := "blob"
+	actualTTL := ttl
+	switch {
+	case strings.Contains(key, "manifests"):
+		cacheType = "manifest"
+		actualTTL = s.cfg.ManifestCacheTTL
+	case strings.Contains(key, "tags"):
+		cacheType = "tag"
+		actualTTL = s.cfg.TagCacheTTL
+	default:
+		actualTTL = s.cfg.BlobCacheTTL
+	}
+
 	_, err := s.uploader.UploadWithContext(ctx, &s3manager.UploadInput{
 		Bucket:      aws.String(s.cfg.S3Bucket),
 		Key:         aws.String(key),
@@ -176,19 +195,24 @@ func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest,
 		return fmt.Errorf("upload failed: %w", err)
 	}
 
-	entry := models.CacheEntry{
-		Key:        key,
-		Digest:     digest,
-		MediaType:  mediaType,
-		StoredAt:   time.Now(),
-		ExpiresAt:  time.Now().Add(ttl),
-		LastAccess: time.Now(),
-		SizeBytes:  int64(len(content)),
+	entry := models.RegistryCache{
+		Key:          key,
+		Type:         cacheType,
+		Digest:       digest,
+		MediaType:    mediaType,
+		StoredAt:     time.Now(),
+		ExpiresAt:    time.Now().Add(actualTTL),
+		LastAccess:   time.Now(),
+		SizeBytes:    int64(len(content)),
+		LastModified: time.Now(),
 	}
 
 	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"digest", "media_type", "expires_at", "last_access", "size_bytes"}),
+		Columns: []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"type", "digest", "media_type", "expires_at",
+			"last_access", "size_bytes", "last_modified",
+		}),
 	}).Create(&entry).Error; err != nil {
 		log.WithError(err).Error("Failed to upsert cache entry")
 		return fmt.Errorf("database error: %w", err)
@@ -231,19 +255,29 @@ func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader
 		})
 
 		if err == nil {
-			entry := models.CacheEntry{
-				Key:        key,
-				Digest:     digest,
-				MediaType:  mediaType,
-				StoredAt:   time.Now(),
-				ExpiresAt:  time.Now().Add(ttl),
-				LastAccess: time.Now(),
-				SizeBytes:  -1,
+			cacheType := "blob"
+			if strings.Contains(key, "manifests") {
+				cacheType = "manifest"
+			}
+
+			entry := models.RegistryCache{
+				Key:          key,
+				Type:         cacheType,
+				Digest:       digest,
+				MediaType:    mediaType,
+				StoredAt:     time.Now(),
+				ExpiresAt:    time.Now().Add(ttl),
+				LastAccess:   time.Now(),
+				SizeBytes:    -1,
+				LastModified: time.Now(),
 			}
 
 			if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "key"}},
-				DoUpdates: clause.AssignmentColumns([]string{"digest", "media_type", "expires_at", "last_access"}),
+				Columns: []clause.Column{{Name: "key"}},
+				DoUpdates: clause.AssignmentColumns([]string{
+					"type", "digest", "media_type", "expires_at",
+					"last_access", "last_modified",
+				}),
 			}).Create(&entry).Error; err != nil {
 				log.WithError(err).Error("Failed to upsert stream cache entry")
 				return fmt.Errorf("database error: %w", err)
@@ -298,9 +332,17 @@ func (s *S3Storage) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("s3 delete failed: %w", err)
 	}
 
-	if err := s.db.WithContext(ctx).Where("key = ?", key).Delete(&models.CacheEntry{}).Error; err != nil {
-		log.WithError(err).Error("Failed to delete cache entry from DB")
-		return fmt.Errorf("database delete failed: %w", err)
+	if strings.Contains(key, "tags/list") {
+		repo := strings.Split(key, "/")[0]
+		if err := s.db.WithContext(ctx).Where("repository = ?", repo).Delete(&models.TagCache{}).Error; err != nil {
+			log.WithError(err).Error("Failed to delete tag cache entry")
+			return fmt.Errorf("database delete failed: %w", err)
+		}
+	} else {
+		if err := s.db.WithContext(ctx).Where("key = ?", key).Delete(&models.RegistryCache{}).Error; err != nil {
+			log.WithError(err).Error("Failed to delete registry cache entry")
+			return fmt.Errorf("database delete failed: %w", err)
+		}
 	}
 
 	log.Debug("Cache entry deleted")
@@ -308,7 +350,7 @@ func (s *S3Storage) Delete(ctx context.Context, key string) error {
 }
 
 func (s *S3Storage) UpdateLastAccess(ctx context.Context, key string) error {
-	return s.db.WithContext(ctx).Model(&models.CacheEntry{}).
+	return s.db.WithContext(ctx).Model(&models.RegistryCache{}).
 		Where("key = ?", key).
 		Update("last_access", time.Now()).Error
 }

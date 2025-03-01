@@ -91,7 +91,7 @@ func (c *Client) getToken(ctx context.Context, realm string, service string, sco
 	return nil
 }
 
-func (c *Client) doRequestWithAuth(ctx context.Context, req *http.Request) (*http.Response, error) {
+func (c *Client) DoRequestWithAuth(ctx context.Context, req *http.Request) (*http.Response, error) {
 	req.Header.Set("User-Agent", "RegistryProxy/1.0")
 
 	if c.token != "" && time.Now().Before(c.tokenExp) {
@@ -167,13 +167,13 @@ func (c *Client) GetManifest(ctx context.Context, image, reference, acceptHeader
 	} else {
 		req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
 	}
-	return c.doRequestWithAuth(ctx, req)
+	return c.DoRequestWithAuth(ctx, req)
 }
 
 func (c *Client) GetBlob(ctx context.Context, image, digest string) (*http.Response, error) {
 	url := fmt.Sprintf("https://registry-1.docker.io/v2/%s/blobs/%s", normalizeImageName(image), digest)
 	req, _ := http.NewRequest("GET", url, nil)
-	return c.doRequestWithAuth(ctx, req)
+	return c.DoRequestWithAuth(ctx, req)
 }
 
 func normalizeImageName(image string) string {
@@ -181,4 +181,10 @@ func normalizeImageName(image string) string {
 		return "library/" + image
 	}
 	return image
+}
+
+func (c *Client) GetTags(ctx context.Context, image string) (*http.Response, error) {
+	url := fmt.Sprintf("https://registry-1.docker.io/v2/%s/tags/list", normalizeImageName(image))
+	req, _ := http.NewRequest("GET", url, nil)
+	return c.DoRequestWithAuth(ctx, req)
 }

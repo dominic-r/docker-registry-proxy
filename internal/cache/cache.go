@@ -46,36 +46,33 @@ func (c *CachePurger) Start(ctx context.Context) {
 }
 
 func (c *CachePurger) purgeExpiredCache(ctx context.Context, log *logrus.Entry) {
-	start := time.Now()
 	log = log.WithField("operation", "cache_purge")
 
-	var entries []models.CacheEntry
+	var registryEntries []models.RegistryCache
 	if err := c.db.WithContext(ctx).
-		Where("expires_at < ? OR last_access < ?",
-			time.Now(),
-			time.Now().Add(-7*24*time.Hour)).
-		Find(&entries).Error; err != nil {
-		log.WithError(err).Error("Cache purge query failed")
-		return
+		Where("expires_at < ? OR last_access < ?", time.Now(), time.Now().Add(-7*24*time.Hour)).
+		Find(&registryEntries).Error; err != nil {
+		log.WithError(err).Error("Registry cache purge query failed")
 	}
 
-	log.WithField("count", len(entries)).Info("Processing expired cache entries")
-	deleted := 0
+	var tagEntries []models.TagCache
+	if err := c.db.WithContext(ctx).
+		Where("expires_at < ?", time.Now()).
+		Find(&tagEntries).Error; err != nil {
+		log.WithError(err).Error("Tag cache purge query failed")
+	}
 
-	for _, entry := range entries {
+	log.WithField("count", len(registryEntries)+len(tagEntries)).Info("Processing expired cache entries")
+
+	for _, entry := range registryEntries {
 		if err := c.storage.Delete(ctx, entry.Key); err != nil {
-			log.WithFields(logrus.Fields{
-				"key":   entry.Key,
-				"error": err,
-			}).Error("Failed to delete cache entry")
-			continue
+			log.WithFields(logrus.Fields{"key": entry.Key, "error": err}).Error("Failed to delete registry cache entry")
 		}
-		deleted++
 	}
 
-	log.WithFields(logrus.Fields{
-		"deleted_entries": deleted,
-		"failed_deletes":  len(entries) - deleted,
-		"duration":        time.Since(start),
-	}).Info("Cache purge completed")
+	for _, entry := range tagEntries {
+		if err := c.db.Delete(&entry).Error; err != nil {
+			log.WithFields(logrus.Fields{"repository": entry.Repository, "error": err}).Error("Failed to delete tag cache entry")
+		}
+	}
 }

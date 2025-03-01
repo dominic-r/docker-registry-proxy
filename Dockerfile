@@ -3,7 +3,9 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o registry-proxy ./cmd/server
+RUN apk add --no-cache binutils
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o registry-proxy ./cmd/server
+RUN strip registry-proxy
 
 FROM alpine:3.21.3  
 RUN apk add --no-cache ca-certificates
