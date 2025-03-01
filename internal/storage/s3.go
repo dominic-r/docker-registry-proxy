@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -22,11 +23,16 @@ import (
 )
 
 type S3Storage struct {
-	client   *s3.S3
-	uploader *s3manager.Uploader
-	cfg      *config.Config
-	db       *gorm.DB
-	log      *logrus.Entry
+	client         *s3.S3
+	uploader       *s3manager.Uploader
+	cfg            *config.Config
+	db             *gorm.DB
+	log            *logrus.Entry
+	activeUploads  sync.Map
+	mu             sync.Mutex
+	partSize       int64
+	maxRetries     int
+	uploadTimeouts map[string]time.Time
 }
 
 func NewS3Storage(logger *logrus.Logger, cfg *config.Config, db *gorm.DB) *S3Storage {
@@ -43,16 +49,20 @@ func NewS3Storage(logger *logrus.Logger, cfg *config.Config, db *gorm.DB) *S3Sto
 	sess := session.Must(session.NewSession(awsConfig))
 
 	uploader := s3manager.NewUploader(sess, func(u *s3manager.Uploader) {
-		u.PartSize = 10 * 1024 * 1024
-		u.Concurrency = 5
+		u.PartSize = 5 * 1024 * 1024
+		u.Concurrency = 3
+		u.LeavePartsOnError = false
 	})
 
 	return &S3Storage{
-		client:   s3.New(sess),
-		uploader: uploader,
-		cfg:      cfg,
-		db:       db,
-		log:      logger.WithField("component", "storage"),
+		client:         s3.New(sess),
+		uploader:       uploader,
+		cfg:            cfg,
+		db:             db,
+		log:            logger.WithField("component", "storage"),
+		partSize:       10 * 1024 * 1024,
+		maxRetries:     5,
+		uploadTimeouts: make(map[string]time.Time),
 	}
 }
 
@@ -61,6 +71,21 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, string
 		"operation": "get",
 		"key":       key,
 	})
+
+	if expiry, exists := s.activeUploads.Load(key); exists {
+		if time.Now().Before(expiry.(time.Time)) {
+			log.Debug("Waiting for active upload completion")
+			for i := 0; i < 10; i++ {
+				time.Sleep(500 * time.Millisecond)
+				var entry models.CacheEntry
+				if err := s.db.WithContext(ctx).Where("key = ?", key).First(&entry).Error; err == nil {
+					break
+				}
+			}
+		} else {
+			s.activeUploads.Delete(key)
+		}
+	}
 
 	var entry models.CacheEntry
 	if err := s.db.WithContext(ctx).Where("key = ?", key).First(&entry).Error; err != nil {
@@ -85,11 +110,16 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, string
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
+		if awsErr, ok := err.(awserr.Error); ok {
 			log.WithFields(logrus.Fields{
-				"code":    aerr.Code(),
-				"message": aerr.Message(),
+				"code":    awsErr.Code(),
+				"message": awsErr.Message(),
 			}).Error("S3 get failed")
+
+			if reqErr, ok := err.(awserr.RequestFailure); ok {
+				log.Errorf("HTTP Status: %d", reqErr.StatusCode())
+				log.Errorf("Request ID: %s", reqErr.RequestID())
+			}
 		}
 		return nil, "", "", fmt.Errorf("s3 get failed: %w", err)
 	}
@@ -142,7 +172,7 @@ func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest,
 	})
 
 	if err != nil {
-		log.WithError(err).Error("S3 upload failed")
+		s.logS3ErrorDetails(err, log)
 		return fmt.Errorf("upload failed: %w", err)
 	}
 
@@ -176,43 +206,81 @@ func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader
 		"media_type": mediaType,
 	})
 
-	uploadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
+	s.mu.Lock()
+	s.uploadTimeouts[key] = time.Now().Add(30 * time.Minute)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.uploadTimeouts, key)
+		s.mu.Unlock()
+	}()
 
-	_, err := s.uploader.UploadWithContext(uploadCtx, &s3manager.UploadInput{
-		Bucket:      aws.String(s.cfg.S3Bucket),
-		Key:         aws.String(key),
-		Body:        content,
-		ContentType: aws.String(mediaType),
-		Metadata: map[string]*string{
-			"Docker-Content-Digest": aws.String(digest),
-		},
-	})
-	if err != nil {
-		log.WithError(err).Error("S3 stream upload failed")
-		return fmt.Errorf("stream upload failed: %w", err)
+	var lastErr error
+	for attempt := 1; attempt <= s.maxRetries; attempt++ {
+		uploadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+
+		_, err := s.uploader.UploadWithContext(uploadCtx, &s3manager.UploadInput{
+			Bucket:      aws.String(s.cfg.S3Bucket),
+			Key:         aws.String(key),
+			Body:        content,
+			ContentType: aws.String(mediaType),
+			Metadata: map[string]*string{
+				"Docker-Content-Digest": aws.String(digest),
+			},
+		})
+
+		if err == nil {
+			entry := models.CacheEntry{
+				Key:        key,
+				Digest:     digest,
+				MediaType:  mediaType,
+				StoredAt:   time.Now(),
+				ExpiresAt:  time.Now().Add(ttl),
+				LastAccess: time.Now(),
+				SizeBytes:  -1,
+			}
+
+			if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "key"}},
+				DoUpdates: clause.AssignmentColumns([]string{"digest", "media_type", "expires_at", "last_access"}),
+			}).Create(&entry).Error; err != nil {
+				log.WithError(err).Error("Failed to upsert stream cache entry")
+				return fmt.Errorf("database error: %w", err)
+			}
+
+			log.Debug("Stream cache entry stored")
+			return nil
+		}
+
+		lastErr = err
+		s.logS3ErrorDetails(err, log)
+
+		if awsErr, ok := err.(awserr.Error); ok {
+			if awsErr.Code() == "RequestCanceled" {
+				log.Warnf("Upload canceled, retry %d/%d", attempt, s.maxRetries)
+				time.Sleep(time.Duration(attempt) * time.Second)
+				continue
+			}
+
+			if reqErr, ok := err.(awserr.RequestFailure); ok {
+				if reqErr.StatusCode() == 413 {
+					log.Error("Entity too large - consider reducing part size")
+					return fmt.Errorf("configured part size too large: %w", err)
+				}
+			}
+		}
+
+		if !isRetryableError(err) {
+			log.Error("Non-retryable error encountered")
+			break
+		}
+
+		log.Warnf("Retrying upload (%d/%d)", attempt, s.maxRetries)
+		time.Sleep(time.Duration(attempt*2) * time.Second)
 	}
 
-	entry := models.CacheEntry{
-		Key:        key,
-		Digest:     digest,
-		MediaType:  mediaType,
-		StoredAt:   time.Now(),
-		ExpiresAt:  time.Now().Add(ttl),
-		LastAccess: time.Now(),
-		SizeBytes:  -1,
-	}
-
-	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"digest", "media_type", "expires_at", "last_access"}),
-	}).Create(&entry).Error; err != nil {
-		log.WithError(err).Error("Failed to upsert stream cache entry")
-		return fmt.Errorf("database error: %w", err)
-	}
-
-	log.Debug("Stream cache entry stored")
-	return nil
+	return fmt.Errorf("upload failed after %d attempts: %w", s.maxRetries, lastErr)
 }
 
 func (s *S3Storage) Delete(ctx context.Context, key string) error {
@@ -243,4 +311,48 @@ func (s *S3Storage) UpdateLastAccess(ctx context.Context, key string) error {
 	return s.db.WithContext(ctx).Model(&models.CacheEntry{}).
 		Where("key = ?", key).
 		Update("last_access", time.Now()).Error
+}
+
+func (s *S3Storage) logS3ErrorDetails(err error, log *logrus.Entry) {
+	if awsErr, ok := err.(awserr.Error); ok {
+		log.WithField("code", awsErr.Code())
+
+		if reqErr, ok := err.(awserr.RequestFailure); ok {
+			log.WithFields(logrus.Fields{
+				"status_code": reqErr.StatusCode(),
+				"request_id":  reqErr.RequestID(),
+				"host_id":     "e",
+			})
+
+			if reqErr.StatusCode() >= 400 {
+				log.Errorf("Response Body: %s", string(reqErr.OrigErr().Error()))
+			}
+		}
+
+		if origErr := awsErr.OrigErr(); origErr != nil {
+			log.WithField("original_error", origErr.Error())
+		}
+	}
+	log.Error("S3 operation failed")
+}
+
+func isRetryableError(err error) bool {
+	if awsErr, ok := err.(awserr.Error); ok {
+		switch awsErr.Code() {
+		case "RequestTimeout",
+			"Throttling",
+			"ThrottlingException",
+			"RequestLimitExceeded",
+			"ServiceUnavailable",
+			"InternalError",
+			"EC2RoleRequestError":
+			return true
+		}
+	}
+
+	if reqErr, ok := err.(awserr.RequestFailure); ok {
+		return reqErr.StatusCode() >= 500
+	}
+
+	return false
 }
