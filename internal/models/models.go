@@ -19,6 +19,7 @@ type AccessLog struct {
 type CacheEntry struct {
 	Key        string    `gorm:"primaryKey;type:varchar(512);not null"`
 	Digest     string    `gorm:"type:varchar(128);not null"`
+	MediaType  string    `gorm:"type:varchar(128);not null"`
 	StoredAt   time.Time `gorm:"index;not null"`
 	ExpiresAt  time.Time `gorm:"index;not null"`
 	LastAccess time.Time `gorm:"index;not null"`

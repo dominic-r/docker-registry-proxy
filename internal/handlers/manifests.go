@@ -57,29 +57,19 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, image, reference string) {
 	ctx := r.Context()
 	cacheKey := fmt.Sprintf("manifests/%s/%s", image, reference)
-	log := h.log.WithFields(logrus.Fields{
-		"operation": "manifest",
-		"image":     image,
-		"reference": reference,
-	})
 
-	content, digest, err := h.storage.Get(ctx, cacheKey)
+	content, digest, mediaType, err := h.storage.Get(ctx, cacheKey)
 	if err == nil {
-		if err := h.storage.UpdateLastAccess(ctx, cacheKey); err != nil {
-			log.WithError(err).Warn("Failed to update last access")
-		}
-		w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
+		w.Header().Set("Content-Type", mediaType)
 		w.Header().Set("Docker-Content-Digest", digest)
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+		w.WriteHeader(http.StatusOK)
 		w.Write(content)
 		return
 	}
 
-	acceptHeader := r.Header.Get("Accept")
-	resp, err := h.dhClient.GetManifest(ctx, image, reference, acceptHeader)
-
+	resp, err := h.dhClient.GetManifest(ctx, image, reference, r.Header.Get("Accept"))
 	if err != nil {
-		log.WithError(err).Error("Failed to fetch manifest")
 		http.Error(w, "Failed to fetch manifest", http.StatusBadGateway)
 		return
 	}
@@ -90,26 +80,20 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 		return
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.WithError(err).Error("Failed to read manifest body")
-		http.Error(w, "Failed to process manifest", http.StatusInternalServerError)
-		return
-	}
-
+	body, _ := io.ReadAll(resp.Body)
+	mediaType = resp.Header.Get("Content-Type")
 	digest = resp.Header.Get("Docker-Content-Digest")
 	if digest == "" {
 		hash := sha256.Sum256(body)
 		digest = "sha256:" + hex.EncodeToString(hash[:])
 	}
 
-	if err := h.storage.Put(ctx, cacheKey, body, digest, h.cfg.CacheTTL); err != nil {
-		log.WithError(err).Error("Failed to cache manifest")
+	if err := h.storage.Put(ctx, cacheKey, body, digest, mediaType, h.cfg.CacheTTL); err != nil {
+		h.log.WithError(err).Error("Failed to cache manifest")
 	}
 
-	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.Header().Set("Content-Type", mediaType)
 	w.Header().Set("Docker-Content-Digest", digest)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
 }
@@ -117,55 +101,34 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image, digest string) {
 	ctx := r.Context()
 	cacheKey := fmt.Sprintf("blobs/%s/%s", image, digest)
-	log := h.log.WithFields(logrus.Fields{
-		"operation": "blob",
-		"image":     image,
-		"digest":    digest,
-	})
 
-	content, _, err := h.storage.Get(ctx, cacheKey)
+	content, cachedDigest, mediaType, err := h.storage.Get(ctx, cacheKey)
 	if err == nil {
-		if err := h.storage.UpdateLastAccess(ctx, cacheKey); err != nil {
-			log.WithError(err).Warn("Failed to update last access")
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.Header().Set("Content-Type", mediaType)
+		w.Header().Set("Docker-Content-Digest", cachedDigest)
+		w.Header().Set("Content-Length", fmt.Sprint(len(content)))
 		w.Write(content)
 		return
 	}
 
 	resp, err := h.dhClient.GetBlob(ctx, image, digest)
 	if err != nil {
-		log.WithError(err).Error("Failed to fetch blob")
 		http.Error(w, "Failed to fetch blob", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		forwardResponse(w, resp)
-		return
-	}
-
 	var buf bytes.Buffer
 	tee := io.TeeReader(resp.Body, &buf)
+	mediaType = resp.Header.Get("Content-Type")
 
-	contentLength := resp.Header.Get("Content-Length")
-	if contentLength == "" {
-		log.Warn("Missing Content-Length header for blob")
-	}
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	if contentLength != "" {
-		w.Header().Set("Content-Length", contentLength)
-	}
-
-	if err := h.storage.PutStream(ctx, cacheKey, tee, digest, h.cfg.CacheTTL); err != nil {
-		log.WithError(err).Error("Caching failed")
+	if err := h.storage.PutStream(ctx, cacheKey, tee, digest, mediaType, h.cfg.CacheTTL); err != nil {
 		http.Error(w, "Caching failed", http.StatusInternalServerError)
 		return
 	}
 
+	w.Header().Set("Content-Type", mediaType)
+	w.Header().Set("Docker-Content-Digest", digest)
 	io.Copy(w, &buf)
 }
 
