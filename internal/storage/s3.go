@@ -24,7 +24,7 @@ type S3Storage struct {
 	uploader *s3manager.Uploader
 	cfg      *config.Config
 	db       *gorm.DB
-	logger   *logrus.Logger
+	log      *logrus.Entry
 }
 
 func NewS3Storage(logger *logrus.Logger, cfg *config.Config, db *gorm.DB) *S3Storage {
@@ -44,12 +44,12 @@ func NewS3Storage(logger *logrus.Logger, cfg *config.Config, db *gorm.DB) *S3Sto
 		uploader: s3manager.NewUploader(sess),
 		cfg:      cfg,
 		db:       db,
-		logger:   logger.WithField("component", "storage"),
+		log:      logger.WithField("component", "storage"),
 	}
 }
 
 func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, error) {
-	log := s.logger.WithFields(logrus.Fields{
+	log := s.log.WithFields(logrus.Fields{
 		"operation": "get",
 		"key":       key,
 	})
@@ -107,7 +107,7 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, error)
 }
 
 func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest string, ttl time.Duration) error {
-	log := s.logger.WithFields(logrus.Fields{
+	log := s.log.WithFields(logrus.Fields{
 		"operation": "put",
 		"key":       key,
 		"size":      len(content),
@@ -148,7 +148,7 @@ func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest 
 }
 
 func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader, digest string, ttl time.Duration) error {
-	log := s.logger.WithFields(logrus.Fields{
+	log := s.log.WithFields(logrus.Fields{
 		"operation": "put_stream",
 		"key":       key,
 		"digest":    digest,
@@ -187,7 +187,7 @@ func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader
 }
 
 func (s *S3Storage) Delete(ctx context.Context, key string) error {
-	log := s.logger.WithFields(logrus.Fields{
+	log := s.log.WithFields(logrus.Fields{
 		"operation": "delete",
 		"key":       key,
 	})
@@ -211,7 +211,7 @@ func (s *S3Storage) Delete(ctx context.Context, key string) error {
 }
 
 func (s *S3Storage) UpdateLastAccess(ctx context.Context, key string) error {
-	log := s.logger.WithFields(logrus.Fields{
+	log := s.log.WithFields(logrus.Fields{
 		"operation": "update_last_access",
 		"key":       key,
 	})

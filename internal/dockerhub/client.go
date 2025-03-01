@@ -18,12 +18,17 @@ type Client struct {
 	config     *config.Config
 	log        *logrus.Entry
 	token      string
+	tokenExp   time.Time
 }
 
 type tokenResponse struct {
 	Token     string    `json:"token"`
 	ExpiresIn int       `json:"expires_in"`
 	IssuedAt  time.Time `json:"issued_at"`
+}
+
+type loggingTransport struct {
+	log *logrus.Entry
 }
 
 func NewClient(logger *logrus.Logger, cfg *config.Config) *Client {
@@ -37,10 +42,10 @@ func NewClient(logger *logrus.Logger, cfg *config.Config) *Client {
 	}
 }
 
-func (c *Client) getToken(ctx context.Context, realm, service, scope string) error {
+func (c *Client) getToken(ctx context.Context, realm string, service string, scope string) error {
 	start := time.Now()
 	log := c.log.WithFields(logrus.Fields{
-		"operation": "get_token",
+		"operation": "token_auth",
 		"realm":     realm,
 		"service":   service,
 		"scope":     scope,
@@ -82,17 +87,14 @@ func (c *Client) getToken(ctx context.Context, realm, service, scope string) err
 	log.WithFields(logrus.Fields{
 		"duration":   time.Since(start),
 		"expires_in": tokenResp.ExpiresIn,
-	}).Debug("Acquired new Docker Hub token")
-
+	}).Debug("Acquired Docker Hub token")
 	return nil
 }
 
 func (c *Client) doRequestWithAuth(ctx context.Context, req *http.Request) (*http.Response, error) {
-	if time.Now().Add(1 * time.Minute).After(c.tokenExp) {
-		c.token = ""
-	}
+	req.Header.Set("User-Agent", "RegistryProxy/1.0")
 
-	if c.token != "" {
+	if c.token != "" && time.Now().Before(c.tokenExp) {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 
@@ -103,13 +105,17 @@ func (c *Client) doRequestWithAuth(ctx context.Context, req *http.Request) (*htt
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		resp.Body.Close()
 		authHeader := resp.Header.Get("WWW-Authenticate")
 		if authHeader == "" {
 			return resp, nil
 		}
 
-		params := parseAuthParams(authHeader)
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			return resp, nil
+		}
+
+		params := parseAuthParams(parts[1])
 		if err := c.getToken(ctx, params["realm"], params["service"], params["scope"]); err != nil {
 			return nil, fmt.Errorf("failed to get token: %w", err)
 		}
@@ -122,20 +128,14 @@ func (c *Client) doRequestWithAuth(ctx context.Context, req *http.Request) (*htt
 	return resp, nil
 }
 
-type loggingTransport struct {
-	logger *logrus.Logger
-}
-
 func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := time.Now()
-	log := t.logger.WithFields(logrus.Fields{
+	log := t.log.WithFields(logrus.Fields{
 		"method": req.Method,
 		"url":    req.URL.String(),
 	})
 
 	resp, err := http.DefaultTransport.RoundTrip(req)
-	duration := time.Since(start)
-
 	if err != nil {
 		log.WithError(err).Error("HTTP request failed")
 		return nil, err
@@ -143,16 +143,13 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	log.WithFields(logrus.Fields{
 		"status_code": resp.StatusCode,
-		"duration":    duration,
-		"size_bytes":  resp.ContentLength,
+		"duration":    time.Since(start),
 	}).Debug("HTTP request completed")
-
 	return resp, nil
 }
 
 func parseAuthParams(header string) map[string]string {
 	params := make(map[string]string)
-	header = strings.TrimPrefix(header, "Bearer ")
 	for _, part := range strings.Split(header, ",") {
 		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
 		if len(kv) == 2 {
