@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -40,9 +41,15 @@ func NewS3Storage(logger *logrus.Logger, cfg *config.Config, db *gorm.DB) *S3Sto
 	}
 
 	sess := session.Must(session.NewSession(awsConfig))
+
+	uploader := s3manager.NewUploader(sess, func(u *s3manager.Uploader) {
+		u.PartSize = 10 * 1024 * 1024
+		u.Concurrency = 5
+	})
+
 	return &S3Storage{
 		client:   s3.New(sess),
-		uploader: s3manager.NewUploader(sess),
+		uploader: uploader,
 		cfg:      cfg,
 		db:       db,
 		log:      logger.WithField("component", "storage"),
@@ -57,7 +64,7 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, string
 
 	var entry models.CacheEntry
 	if err := s.db.WithContext(ctx).Where("key = ?", key).First(&entry).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Debug("Cache miss")
 			return nil, "", "", fmt.Errorf("cache miss")
 		}
@@ -169,7 +176,10 @@ func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader
 		"media_type": mediaType,
 	})
 
-	_, err := s.uploader.UploadWithContext(ctx, &s3manager.UploadInput{
+	uploadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	_, err := s.uploader.UploadWithContext(uploadCtx, &s3manager.UploadInput{
 		Bucket:      aws.String(s.cfg.S3Bucket),
 		Key:         aws.String(key),
 		Body:        content,
