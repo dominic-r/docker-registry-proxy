@@ -1,0 +1,36 @@
+name: Build and Publish Docker Image
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: extract_version
+        run: |
+          VERSION=${{ github.event.release.tag_name }}
+          VERSION_CLEANED=$(echo "$VERSION" | sed 's/-sws$//')
+          echo "VERSION=$VERSION_CLEANED" >> $GITHUB_ENV
+          echo "Version after cleaning: $VERSION_CLEANED"
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build Docker image
+        run: |
+          docker build -t ghcr.io/dominic-r/docker-registry-proxy:${VERSION} .
+
+      - name: Push Docker image
+        run: |
+          docker push ghcr.io/dominic-r/docker-registry-proxy:${VERSION}
