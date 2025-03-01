@@ -2,27 +2,68 @@ package main
 
 import (
 	"context"
-	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/sdko-org/registry-proxy/internal/cache"
 	"github.com/sdko-org/registry-proxy/internal/config"
 	"github.com/sdko-org/registry-proxy/internal/database"
 	"github.com/sdko-org/registry-proxy/internal/dockerhub"
 	"github.com/sdko-org/registry-proxy/internal/handlers"
-	"github.com/sdko-org/registry-proxy/internal/models"
+	httpserver "github.com/sdko-org/registry-proxy/internal/http"
 	"github.com/sdko-org/registry-proxy/internal/storage"
+	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
 
-func main() {
-	cfg := config.Load()
+var logger = logrus.New()
 
-	db, err := database.NewPostgresDB(database.PostgresConfig{
+func main() {
+	configureLogger()
+	logger.Info("Starting registry proxy server")
+
+	cfg, err := config.Load(logger)
+	if err != nil {
+		logger.WithError(err).Fatal("Failed to load configuration")
+	}
+
+	db := initializeDatabase(cfg)
+	s3Storage := storage.NewS3Storage(logger, cfg, db)
+	dhClient := dockerhub.NewClient(logger, cfg)
+
+	router := setupRouter(cfg, db, s3Storage, dhClient)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cachePurger := cache.NewCachePurger(logger, db, s3Storage, cfg)
+	go cachePurger.Start(ctx)
+
+	httpserver.StartServers(logger, router)
+
+	handleGracefulShutdown()
+
+	logger.Info("Server running on ports 8443 (HTTP) and 9443 (HTTPS)")
+	select {}
+}
+
+func configureLogger() {
+	logger.SetFormatter(&logrus.JSONFormatter{
+		TimestampFormat: time.RFC3339Nano,
+	})
+	logger.SetOutput(os.Stdout)
+	if os.Getenv("DEBUG") == "true" {
+		logger.SetLevel(logrus.DebugLevel)
+	} else {
+		logger.SetLevel(logrus.InfoLevel)
+	}
+}
+
+func initializeDatabase(cfg *config.Config) *gorm.DB {
+	db, err := database.NewPostgresDB(logger, database.PostgresConfig{
 		User:     cfg.PostgresUser,
 		Password: cfg.PostgresPassword,
 		Host:     cfg.PostgresHost,
@@ -31,77 +72,31 @@ func main() {
 		SSLMode:  cfg.PostgresSSLMode,
 	})
 	if err != nil {
-		log.Fatalf("Database initialization failed: %v", err)
+		logger.WithError(err).Fatal("Database initialization failed")
 	}
+	return db
+}
 
-	s3Storage := storage.NewS3Storage(cfg, db)
-	dhClient := dockerhub.NewClient(cfg)
-
-	handler := handlers.NewProxyHandler(cfg, s3Storage, dhClient)
-
+func setupRouter(cfg *config.Config, db *gorm.DB, storage storage.Storage, dhClient *dockerhub.Client) *mux.Router {
 	r := mux.NewRouter()
-	r.Use(handlers.LoggingMiddleware(db))
+	r.Use(handlers.LoggingMiddleware(logger, db))
+	r.Use(handlers.RateLimitMiddleware(cfg))
 
 	r.HandleFunc("/v2/", handlers.HandleV2Check).Methods("GET")
-	r.PathPrefix("/v2/").Handler(handler)
-
-	go startCachePurger(context.Background(), db, s3Storage, cfg)
-
-	server := &http.Server{
-		Addr:         ":8080",
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-	}
-
-	go func() {
-		sigint := make(chan os.Signal, 1)
-		signal.Notify(sigint, syscall.SIGINT, syscall.SIGTERM)
-		<-sigint
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := server.Shutdown(ctx); err != nil {
-			log.Printf("Server shutdown error: %v", err)
-		}
-	}()
-
-	log.Printf("Starting server on %s", server.Addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("Server failed: %v", err)
-	}
+	r.PathPrefix("/v2/").Handler(handlers.NewProxyHandler(logger, cfg, storage, dhClient))
+	return r
 }
 
-func startCachePurger(ctx context.Context, db *gorm.DB, storage storage.Storage, cfg *config.Config) {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
+func handleGracefulShutdown() {
+	sigint := make(chan os.Signal, 1)
+	signal.Notify(sigint, syscall.SIGINT, syscall.SIGTERM)
+	<-sigint
 
-	for {
-		select {
-		case <-ticker.C:
-			purgeExpiredCache(ctx, db, storage)
-		case <-ctx.Done():
-			return
-		}
-	}
-}
+	logger.Info("Initiating graceful shutdown")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-func purgeExpiredCache(ctx context.Context, db *gorm.DB, storage storage.Storage) {
-	var entries []models.CacheEntry
-	now := time.Now()
+	_ = ctx
 
-	if err := db.Where("expires_at < ? OR last_access < ?",
-		now, now.Add(-7*24*time.Hour)).Find(&entries).Error; err != nil {
-		log.Printf("Cache purge query failed: %v", err)
-		return
-	}
-
-	for _, entry := range entries {
-		if err := storage.Delete(ctx, entry.Key); err != nil {
-			log.Printf("Failed to delete cache key %s: %v", entry.Key, err)
-			continue
-		}
-		db.Delete(&entry)
-	}
+	logger.Info("Server shutdown complete")
 }
