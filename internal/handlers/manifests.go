@@ -139,12 +139,28 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 	w.Write(body)
 }
 
-func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image, digest string) {
+func (h *ProxyHandler) handleBlob(w http.ResponseWriter, image, digest string) {
 	if !validDigestRegex.MatchString(digest) {
 		http.Error(w, "Invalid digest format", http.StatusBadRequest)
 		return
 	}
 	ctx := context.Background()
+
+	cacheKey := fmt.Sprintf("blobs/%s/%s", image, digest)
+	content, retrievedDigest, mediaType, err := h.storage.Get(ctx, cacheKey)
+	if err == nil {
+		h.log.WithFields(logrus.Fields{
+			"digest": digest,
+			"source": "s3",
+		}).Info("Serving blob from persistent cache")
+		w.Header().Set("Content-Type", mediaType)
+		w.Header().Set("Docker-Content-Digest", retrievedDigest)
+		w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+		return
+	}
+
 	safeFilename := safeFilenameChars.ReplaceAllString(digest, "_")
 	if len(safeFilename) > 255 {
 		safeFilename = safeFilename[:255]
