@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -16,25 +15,19 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/sdko-org/registry-proxy/internal/config"
 	"github.com/sdko-org/registry-proxy/internal/models"
+	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
-
-type Storage interface {
-	Get(ctx context.Context, key string) ([]byte, string, error)
-	Put(ctx context.Context, key string, content []byte, digest string, ttl time.Duration) error
-	PutStream(ctx context.Context, key string, content io.Reader, digest string, ttl time.Duration) error
-	Delete(ctx context.Context, key string) error
-	UpdateLastAccess(ctx context.Context, key string) error
-}
 
 type S3Storage struct {
 	client   *s3.S3
 	uploader *s3manager.Uploader
 	cfg      *config.Config
 	db       *gorm.DB
+	logger   *logrus.Logger
 }
 
-func NewS3Storage(cfg *config.Config, db *gorm.DB) *S3Storage {
+func NewS3Storage(logger *logrus.Logger, cfg *config.Config, db *gorm.DB) *S3Storage {
 	awsConfig := &aws.Config{
 		Region:           aws.String(cfg.S3Region),
 		Credentials:      credentials.NewStaticCredentials(cfg.S3AccessKey, cfg.S3SecretKey, ""),
@@ -46,28 +39,35 @@ func NewS3Storage(cfg *config.Config, db *gorm.DB) *S3Storage {
 	}
 
 	sess := session.Must(session.NewSession(awsConfig))
-
 	return &S3Storage{
 		client:   s3.New(sess),
 		uploader: s3manager.NewUploader(sess),
 		cfg:      cfg,
 		db:       db,
+		logger:   logger.WithField("component", "storage"),
 	}
 }
 
 func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, error) {
+	log := s.logger.WithFields(logrus.Fields{
+		"operation": "get",
+		"key":       key,
+	})
+
 	var entry models.CacheEntry
-	result := s.db.WithContext(ctx).Where("key = ?", key).First(&entry)
-	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
+	if err := s.db.WithContext(ctx).Where("key = ?", key).First(&entry).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			log.Debug("Cache miss")
 			return nil, "", fmt.Errorf("cache miss")
 		}
-		return nil, "", fmt.Errorf("database error: %w", result.Error)
+		log.WithError(err).Error("Database query failed")
+		return nil, "", fmt.Errorf("database error: %w", err)
 	}
 
 	if time.Now().After(entry.ExpiresAt) {
+		log.Debug("Cache entry expired")
 		if err := s.Delete(ctx, key); err != nil {
-			log.Printf("Failed to delete expired cache entry: %v", err)
+			log.WithError(err).Error("Failed to delete expired entry")
 		}
 		return nil, "", fmt.Errorf("cache expired")
 	}
@@ -78,7 +78,10 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, error)
 	})
 	if err != nil {
 		if aerr, ok := err.(awserr.Error); ok {
-			log.Printf("S3 error: %s - %s", aerr.Code(), aerr.Message())
+			log.WithFields(logrus.Fields{
+				"code":    aerr.Code(),
+				"message": aerr.Message(),
+			}).Error("S3 get failed")
 		}
 		return nil, "", fmt.Errorf("s3 get failed: %w", err)
 	}
@@ -86,19 +89,31 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, string, error)
 
 	content, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to read s3 object: %w", err)
+		log.WithError(err).Error("Failed to read S3 object")
+		return nil, "", fmt.Errorf("read failed: %w", err)
 	}
 
 	digest := aws.StringValue(resp.Metadata["Docker-Content-Digest"])
+	log.WithFields(logrus.Fields{
+		"size":   len(content),
+		"digest": digest,
+	}).Debug("Cache hit")
 
 	if err := s.UpdateLastAccess(ctx, key); err != nil {
-		log.Printf("Failed to update last access: %v", err)
+		log.WithError(err).Warn("Failed to update last access")
 	}
 
 	return content, digest, nil
 }
 
 func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest string, ttl time.Duration) error {
+	log := s.logger.WithFields(logrus.Fields{
+		"operation": "put",
+		"key":       key,
+		"size":      len(content),
+		"ttl":       ttl,
+	})
+
 	_, err := s.uploader.UploadWithContext(ctx, &s3manager.UploadInput{
 		Bucket:      aws.String(s.cfg.S3Bucket),
 		Key:         aws.String(key),
@@ -110,10 +125,8 @@ func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest 
 	})
 
 	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			log.Printf("S3 upload error: %s - %s", aerr.Code(), aerr.Message())
-		}
-		return fmt.Errorf("s3 upload failed: %w", err)
+		log.WithError(err).Error("S3 upload failed")
+		return fmt.Errorf("upload failed: %w", err)
 	}
 
 	entry := models.CacheEntry{
@@ -125,14 +138,22 @@ func (s *S3Storage) Put(ctx context.Context, key string, content []byte, digest 
 		SizeBytes:  int64(len(content)),
 	}
 
-	if err := s.db.WithContext(ctx).Save(&entry).Error; err != nil {
-		return fmt.Errorf("failed to save cache entry: %w", err)
+	if err := s.db.WithContext(ctx).Create(&entry).Error; err != nil {
+		log.WithError(err).Error("Failed to create cache entry")
+		return fmt.Errorf("database error: %w", err)
 	}
 
+	log.Debug("Cache entry stored")
 	return nil
 }
 
 func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader, digest string, ttl time.Duration) error {
+	log := s.logger.WithFields(logrus.Fields{
+		"operation": "put_stream",
+		"key":       key,
+		"digest":    digest,
+	})
+
 	_, err := s.uploader.UploadWithContext(ctx, &s3manager.UploadInput{
 		Bucket:      aws.String(s.cfg.S3Bucket),
 		Key:         aws.String(key),
@@ -143,7 +164,8 @@ func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("s3 upload failed: %w", err)
+		log.WithError(err).Error("S3 stream upload failed")
+		return fmt.Errorf("stream upload failed: %w", err)
 	}
 
 	entry := models.CacheEntry{
@@ -155,29 +177,53 @@ func (s *S3Storage) PutStream(ctx context.Context, key string, content io.Reader
 		SizeBytes:  -1,
 	}
 
-	if err := s.db.WithContext(ctx).Save(&entry).Error; err != nil {
-		return fmt.Errorf("failed to save cache entry: %w", err)
+	if err := s.db.WithContext(ctx).Create(&entry).Error; err != nil {
+		log.WithError(err).Error("Failed to create stream cache entry")
+		return fmt.Errorf("database error: %w", err)
 	}
 
+	log.Debug("Stream cache entry stored")
 	return nil
 }
 
 func (s *S3Storage) Delete(ctx context.Context, key string) error {
+	log := s.logger.WithFields(logrus.Fields{
+		"operation": "delete",
+		"key":       key,
+	})
+
 	_, err := s.client.DeleteObjectWithContext(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.cfg.S3Bucket),
 		Key:    aws.String(key),
 	})
-
-	if err := s.db.Where("key = ?", key).Delete(&models.CacheEntry{}).Error; err != nil {
-		log.Printf("Failed to delete cache entry from DB: %v", err)
+	if err != nil {
+		log.WithError(err).Error("S3 delete failed")
+		return fmt.Errorf("s3 delete failed: %w", err)
 	}
 
-	return err
+	if err := s.db.Where("key = ?", key).Delete(&models.CacheEntry{}).Error; err != nil {
+		log.WithError(err).Error("Failed to delete cache entry from DB")
+		return fmt.Errorf("database delete failed: %w", err)
+	}
+
+	log.Debug("Cache entry deleted")
+	return nil
 }
 
 func (s *S3Storage) UpdateLastAccess(ctx context.Context, key string) error {
+	log := s.logger.WithFields(logrus.Fields{
+		"operation": "update_last_access",
+		"key":       key,
+	})
+
 	result := s.db.WithContext(ctx).Model(&models.CacheEntry{}).
 		Where("key = ?", key).
 		Update("last_access", time.Now())
-	return result.Error
+	if result.Error != nil {
+		log.WithError(result.Error).Error("Failed to update last access time")
+		return result.Error
+	}
+
+	log.Debug("Last access time updated")
+	return nil
 }

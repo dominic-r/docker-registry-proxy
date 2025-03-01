@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sdko-org/registry-proxy/internal/models"
+	"github.com/sirupsen/logrus"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -18,30 +19,48 @@ type PostgresConfig struct {
 	SSLMode  string
 }
 
-func NewPostgresDB(cfg PostgresConfig) (*gorm.DB, error) {
+func NewPostgresDB(logger *logrus.Logger, cfg PostgresConfig) (*gorm.DB, error) {
 	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, cfg.SSLMode)
 
+	log := logger.WithFields(logrus.Fields{
+		"component": "database",
+		"host":      cfg.Host,
+		"database":  cfg.DBName,
+	})
+
 	var db *gorm.DB
 	var err error
+	const maxRetries = 5
+	retryDelay := 2 * time.Second
 
-	for i := 0; i < 15; i++ {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
 		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
 		if err == nil {
 			break
 		}
 
-		fmt.Printf("Database connection failed (attempt %d): %v\n", i+1, err)
-		time.Sleep(time.Duration(2+i) * time.Second)
+		log.WithFields(logrus.Fields{
+			"attempt": attempt,
+			"error":   err,
+		}).Warn("Database connection failed")
+
+		if attempt < maxRetries {
+			time.Sleep(retryDelay)
+			retryDelay *= 2
+		}
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database after multiple attempts: %w", err)
+		log.WithError(err).Error("Failed to connect to database after retries")
+		return nil, fmt.Errorf("database connection failed: %w", err)
 	}
 
 	if err := db.AutoMigrate(&models.AccessLog{}, &models.CacheEntry{}); err != nil {
-		return nil, fmt.Errorf("failed to migrate models: %w", err)
+		log.WithError(err).Error("Database migration failed")
+		return nil, fmt.Errorf("database migration failed: %w", err)
 	}
 
+	log.Info("Database connection established")
 	return db, nil
 }

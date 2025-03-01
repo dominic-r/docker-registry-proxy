@@ -1,9 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 type Config struct {
@@ -25,18 +28,18 @@ type Config struct {
 	PostgresSSLMode   string
 }
 
-func Load() *Config {
+func Load(log *logrus.Logger) (*Config, error) {
 	cfg := &Config{
 		S3Bucket:          getEnv("S3_BUCKET", "registry-cache"),
 		S3Region:          getEnv("AWS_REGION", "us-east-1"),
-		S3Endpoint:        mustGetEnv("S3_ENDPOINT"),
-		S3AccessKey:       mustGetEnv("AWS_ACCESS_KEY_ID"),
-		S3SecretKey:       mustGetEnv("AWS_SECRET_ACCESS_KEY"),
-		DockerHubUser:     mustGetEnv("DOCKERHUB_USER"),
-		DockerHubPassword: mustGetEnv("DOCKERHUB_PASSWORD"),
-		CacheTTL:          getEnvDuration("CACHE_TTL", 12*time.Hour),
-		RateLimit:         getEnvInt("RATE_LIMIT", 100),
-		RateLimitWindow:   getEnvDuration("RATE_LIMIT_WINDOW", time.Minute),
+		S3Endpoint:        mustGetEnv(log, "S3_ENDPOINT"),
+		S3AccessKey:       mustGetEnv(log, "AWS_ACCESS_KEY_ID"),
+		S3SecretKey:       mustGetEnv(log, "AWS_SECRET_ACCESS_KEY"),
+		DockerHubUser:     mustGetEnv(log, "DOCKERHUB_USER"),
+		DockerHubPassword: mustGetEnv(log, "DOCKERHUB_PASSWORD"),
+		CacheTTL:          getEnvDuration(log, "CACHE_TTL", 12*time.Hour),
+		RateLimit:         getEnvInt(log, "RATE_LIMIT", 100),
+		RateLimitWindow:   getEnvDuration(log, "RATE_LIMIT_WINDOW", time.Minute),
 		PostgresUser:      getEnv("POSTGRES_USER", "registry"),
 		PostgresPassword:  getEnv("POSTGRES_PASSWORD", "password"),
 		PostgresHost:      getEnv("POSTGRES_HOST", "localhost"),
@@ -45,17 +48,17 @@ func Load() *Config {
 		PostgresSSLMode:   getEnv("POSTGRES_SSL_MODE", "disable"),
 	}
 
-	if cfg.S3AccessKey == "" || cfg.S3SecretKey == "" || cfg.S3Endpoint == "" || cfg.DockerHubUser == "" || cfg.DockerHubPassword == "" {
-		panic("AWS credentials must be provided")
+	if cfg.S3AccessKey == "" || cfg.S3SecretKey == "" || cfg.S3Endpoint == "" {
+		return nil, fmt.Errorf("AWS credentials must be provided")
 	}
 
-	return cfg
+	return cfg, nil
 }
 
-func mustGetEnv(key string) string {
+func mustGetEnv(log *logrus.Logger, key string) string {
 	value := os.Getenv(key)
 	if value == "" {
-		panic("Missing required environment variable: " + key)
+		log.WithField("variable", key).Fatal("Missing required environment variable")
 	}
 	return value
 }
@@ -67,20 +70,36 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
-		}
+func getEnvInt(log *logrus.Logger, key string, defaultValue int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
 	}
-	return defaultValue
+
+	intValue, err := strconv.Atoi(value)
+	if err != nil {
+		log.WithFields(logrus.Fields{
+			"variable": key,
+			"value":    value,
+		}).Warn("Invalid integer value, using default")
+		return defaultValue
+	}
+	return intValue
 }
 
-func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
-	if value := os.Getenv(key); value != "" {
-		if duration, err := time.ParseDuration(value); err == nil {
-			return duration
-		}
+func getEnvDuration(log *logrus.Logger, key string, defaultValue time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
 	}
-	return defaultValue
+
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		log.WithFields(logrus.Fields{
+			"variable": key,
+			"value":    value,
+		}).Warn("Invalid duration format, using default")
+		return defaultValue
+	}
+	return duration
 }
