@@ -26,6 +26,7 @@ type Config struct {
 	PostgresPort      string
 	PostgresDatabase  string
 	PostgresSSLMode   string
+	TempDir           string
 }
 
 func Load(log *logrus.Logger) (*Config, error) {
@@ -46,6 +47,7 @@ func Load(log *logrus.Logger) (*Config, error) {
 		PostgresPort:      getEnv("POSTGRES_PORT", "5432"),
 		PostgresDatabase:  getEnv("POSTGRES_DATABASE", "registry_proxy"),
 		PostgresSSLMode:   getEnv("POSTGRES_SSL_MODE", "disable"),
+		TempDir:           getEnv("TEMP_DIR", "/tmp/registry-proxy"),
 	}
 
 	if cfg.S3AccessKey == "" || cfg.S3SecretKey == "" || cfg.S3Endpoint == "" {

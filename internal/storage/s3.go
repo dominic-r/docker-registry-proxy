@@ -315,22 +315,20 @@ func (s *S3Storage) UpdateLastAccess(ctx context.Context, key string) error {
 
 func (s *S3Storage) logS3ErrorDetails(err error, log *logrus.Entry) {
 	if awsErr, ok := err.(awserr.Error); ok {
-		log.WithField("code", awsErr.Code())
+		log = log.WithFields(logrus.Fields{
+			"aws_error_code":    awsErr.Code(),
+			"aws_error_message": awsErr.Message(),
+		})
 
 		if reqErr, ok := err.(awserr.RequestFailure); ok {
-			log.WithFields(logrus.Fields{
-				"status_code": reqErr.StatusCode(),
-				"request_id":  reqErr.RequestID(),
-				"host_id":     "e",
+			log = log.WithFields(logrus.Fields{
+				"http_status_code": reqErr.StatusCode(),
+				"aws_request_id":   reqErr.RequestID(),
 			})
-
-			if reqErr.StatusCode() >= 400 {
-				log.Errorf("Response Body: %s", string(reqErr.OrigErr().Error()))
-			}
 		}
 
 		if origErr := awsErr.OrigErr(); origErr != nil {
-			log.WithField("original_error", origErr.Error())
+			log = log.WithField("original_error", origErr.Error())
 		}
 	}
 	log.Error("S3 operation failed")
