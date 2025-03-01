@@ -95,6 +95,11 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 	cacheKey := fmt.Sprintf("manifests/%s/%s", image, reference)
 	content, digest, mediaType, err := h.storage.Get(ctx, cacheKey)
 	if err == nil {
+		h.log.WithFields(logrus.Fields{
+			"image":     image,
+			"reference": reference,
+			"source":    "s3",
+		}).Info("Serving manifest from cache")
 		w.Header().Set("Content-Type", mediaType)
 		w.Header().Set("Docker-Content-Digest", digest)
 		w.Header().Set("Content-Length", fmt.Sprint(len(content)))
@@ -102,6 +107,12 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 		w.Write(content)
 		return
 	}
+
+	h.log.WithFields(logrus.Fields{
+		"image":     image,
+		"reference": reference,
+		"source":    "dockerhub",
+	}).Info("Fetching manifest from upstream")
 	resp, err := h.dhClient.GetManifest(ctx, image, reference, r.Header.Get("Accept"))
 	if err != nil {
 		http.Error(w, "Failed to fetch manifest", http.StatusBadGateway)
@@ -154,6 +165,11 @@ func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image,
 	}
 	h.downloadMap.Store(digest, make(chan struct{}))
 	defer h.downloadMap.Delete(digest)
+
+	h.log.WithFields(logrus.Fields{
+		"digest": digest,
+		"source": "dockerhub",
+	}).Info("Downloading blob from upstream")
 	resp, err := h.dhClient.GetBlob(ctx, image, digest)
 	if err != nil {
 		http.Error(w, "Blob fetch failed", http.StatusBadGateway)
@@ -183,6 +199,11 @@ func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image,
 	calculatedDigest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if calculatedDigest != digest {
 		os.Remove(tempPath)
+		h.log.WithFields(logrus.Fields{
+			"expected": digest,
+			"actual":   calculatedDigest,
+			"source":   "dockerhub",
+		}).Error("Blob digest mismatch")
 		http.Error(w, "Digest mismatch", http.StatusBadGateway)
 		return
 	}
@@ -196,6 +217,10 @@ func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image,
 		}
 		defer f.Close()
 		cacheKey := fmt.Sprintf("blobs/%s/%s", image, digest)
+		h.log.WithFields(logrus.Fields{
+			"digest": digest,
+			"source": "s3",
+		}).Info("Storing blob in persistent cache")
 		for attempt := 1; attempt <= 5; attempt++ {
 			f.Seek(0, 0)
 			if err := h.storage.PutStream(ctx, cacheKey, f, digest, "application/octet-stream", h.cfg.CacheTTL); err == nil {
@@ -216,6 +241,12 @@ func (h *ProxyHandler) serveFromTempFile(w http.ResponseWriter, path, digest str
 	if err != nil || fi.Mode().Perm() != 0600 {
 		return false
 	}
+
+	h.log.WithFields(logrus.Fields{
+		"digest": digest,
+		"source": "disk",
+	}).Info("Serving blob from temporary storage")
+
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Docker-Content-Digest", digest)
 	_, err = io.Copy(w, f)
