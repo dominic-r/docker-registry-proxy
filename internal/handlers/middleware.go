@@ -43,6 +43,8 @@ func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
 }
 
 func LoggingMiddleware(logger *logrus.Logger, db *gorm.DB) func(http.Handler) http.Handler {
+	logEntry := logger.WithField("component", "http_middleware")
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -60,7 +62,7 @@ func LoggingMiddleware(logger *logrus.Logger, db *gorm.DB) func(http.Handler) ht
 					"user_agent": r.UserAgent(),
 				}
 
-				logger.WithFields(fields).Info("Request processed")
+				logEntry.WithFields(fields).Info("Request processed")
 
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -78,7 +80,7 @@ func LoggingMiddleware(logger *logrus.Logger, db *gorm.DB) func(http.Handler) ht
 					}
 
 					if err := db.WithContext(ctx).Create(&entry).Error; err != nil {
-						logger.WithError(err).Warn("Failed to save access log")
+						logEntry.WithError(err).Warn("Failed to save access log")
 					}
 				}()
 			}()
