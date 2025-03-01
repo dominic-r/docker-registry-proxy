@@ -12,6 +12,7 @@ import (
 	"github.com/sdko-org/registry-proxy/internal/dockerhub"
 	"github.com/sdko-org/registry-proxy/internal/storage"
 	"github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 )
 
 var (
@@ -27,6 +28,7 @@ type ProxyHandler struct {
 	log         *logrus.Entry
 	downloadMap sync.Map
 	tempDir     string
+	db          *gorm.DB
 }
 
 func NewProxyHandler(logger *logrus.Logger, cfg *config.Config, storage storage.Storage, dhClient *dockerhub.Client) *ProxyHandler {

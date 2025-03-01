@@ -17,7 +17,9 @@ type Config struct {
 	S3SecretKey       string
 	DockerHubUser     string
 	DockerHubPassword string
-	CacheTTL          time.Duration
+	TagCacheTTL       time.Duration
+	ManifestCacheTTL  time.Duration
+	BlobCacheTTL      time.Duration
 	RateLimit         int
 	RateLimitWindow   time.Duration
 	PostgresUser      string
@@ -38,7 +40,9 @@ func Load(log *logrus.Logger) (*Config, error) {
 		S3SecretKey:       mustGetEnv(log, "AWS_SECRET_ACCESS_KEY"),
 		DockerHubUser:     mustGetEnv(log, "DOCKERHUB_USER"),
 		DockerHubPassword: mustGetEnv(log, "DOCKERHUB_PASSWORD"),
-		CacheTTL:          getEnvDuration(log, "CACHE_TTL", 12*time.Hour),
+		TagCacheTTL:       getEnvDuration(log, "TAG_CACHE_TTL", 1*time.Hour),
+		ManifestCacheTTL:  getEnvDuration(log, "MANIFEST_CACHE_TTL", 12*time.Hour),
+		BlobCacheTTL:      getEnvDuration(log, "BLOB_CACHE_TTL", 12*time.Hour),
 		RateLimit:         getEnvInt(log, "RATE_LIMIT", 100),
 		RateLimitWindow:   getEnvDuration(log, "RATE_LIMIT_WINDOW", time.Minute),
 		PostgresUser:      getEnv("POSTGRES_USER", "registry"),

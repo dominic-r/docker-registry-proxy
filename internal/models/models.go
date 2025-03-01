@@ -16,18 +16,35 @@ type AccessLog struct {
 	BytesSent int    `gorm:"not null;default:0"`
 }
 
-type CacheEntry struct {
-	Key        string    `gorm:"primaryKey;type:varchar(512);not null"`
-	Digest     string    `gorm:"type:varchar(128);not null"`
-	MediaType  string    `gorm:"type:varchar(128);not null"`
-	StoredAt   time.Time `gorm:"index;not null"`
-	ExpiresAt  time.Time `gorm:"index;not null"`
-	LastAccess time.Time `gorm:"index;not null"`
-	SizeBytes  int64     `gorm:"not null;default:-1"`
+type RegistryCache struct {
+	Key          string    `gorm:"primaryKey;type:varchar(512);not null"`
+	Type         string    `gorm:"type:varchar(20);not null;index"`
+	Digest       string    `gorm:"type:varchar(128);not null"`
+	MediaType    string    `gorm:"type:varchar(128);not null"`
+	StoredAt     time.Time `gorm:"index;not null"`
+	ExpiresAt    time.Time `gorm:"index;not null"`
+	LastAccess   time.Time `gorm:"index;not null"`
+	SizeBytes    int64     `gorm:"not null;default:-1"`
+	LastModified time.Time `gorm:"index"`
+	ETag         string    `gorm:"type:varchar(128)"`
 }
 
-func (CacheEntry) TableName() string {
-	return "cache_entries"
+type TagCache struct {
+	ID           uint      `gorm:"primaryKey;autoIncrement"`
+	Repository   string    `gorm:"type:varchar(255);not null;index"`
+	Tags         string    `gorm:"type:text;not null"`
+	ETag         string    `gorm:"type:varchar(128);not null"`
+	LastModified time.Time `gorm:"index;not null"`
+	ExpiresAt    time.Time `gorm:"index;not null"`
+	StoredAt     time.Time `gorm:"index;not null"`
+}
+
+func (RegistryCache) TableName() string {
+	return "registry_cache"
+}
+
+func (TagCache) TableName() string {
+	return "tag_cache"
 }
 
 func (AccessLog) TableName() string {
