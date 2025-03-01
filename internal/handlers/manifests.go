@@ -23,7 +23,7 @@ import (
 var (
 	validDigestRegex  = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 	safeFilenameChars = regexp.MustCompile(`[^a-zA-Z0-9-_]`)
-	pathValidator     = regexp.MustCompile(`^[a-zA-Z0-9-_\.\/]+$`)
+	pathValidator     = regexp.MustCompile(`^[a-zA-Z0-9-_:\\./]+$`)
 )
 
 type ProxyHandler struct {
