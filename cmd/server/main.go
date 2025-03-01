@@ -82,7 +82,7 @@ func setupRouter(cfg *config.Config, db *gorm.DB, storage storage.Storage, dhCli
 	r.Use(handlers.LoggingMiddleware(logger, db))
 	r.Use(handlers.RateLimitMiddleware(cfg))
 
-	proxyHandler := handlers.NewProxyHandler(logger, cfg, storage, dhClient)
+	proxyHandler := handlers.NewProxyHandler(logger, cfg, storage, dhClient, db)
 	handlers.RegisterRoutes(r, proxyHandler)
 	return r
 }

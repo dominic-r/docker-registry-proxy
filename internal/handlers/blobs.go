@@ -115,7 +115,7 @@ func (h *ProxyHandler) handleBlob(w http.ResponseWriter, r *http.Request, image,
 		}).Info("Storing blob in persistent cache")
 		for attempt := 1; attempt <= 5; attempt++ {
 			f.Seek(0, 0)
-			if err := h.storage.PutStream(ctx, cacheKey, f, digest, "application/octet-stream", h.cfg.CacheTTL); err == nil {
+			if err := h.storage.PutStream(ctx, cacheKey, f, digest, "application/octet-stream", h.cfg.BlobCacheTTL); err == nil {
 				return
 			}
 			time.Sleep(time.Duration(attempt*2) * time.Second)

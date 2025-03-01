@@ -55,7 +55,7 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 		digest = "sha256:" + hex.EncodeToString(hash[:])
 	}
 
-	if err := h.storage.Put(ctx, cacheKey, body, digest, mediaType, h.cfg.CacheTTL); err != nil {
+	if err := h.storage.Put(ctx, cacheKey, body, digest, mediaType, h.cfg.ManifestCacheTTL); err != nil {
 		h.log.WithError(err).Error("Failed to cache manifest")
 	}
 
