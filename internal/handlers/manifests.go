@@ -75,7 +75,9 @@ func (h *ProxyHandler) handleManifest(w http.ResponseWriter, r *http.Request, im
 		return
 	}
 
-	resp, err := h.dhClient.GetManifest(ctx, image, reference)
+	acceptHeader := r.Header.Get("Accept")
+	resp, err := h.dhClient.GetManifest(ctx, image, reference, acceptHeader)
+
 	if err != nil {
 		log.WithError(err).Error("Failed to fetch manifest")
 		http.Error(w, "Failed to fetch manifest", http.StatusBadGateway)

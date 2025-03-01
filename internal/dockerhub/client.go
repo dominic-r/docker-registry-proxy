@@ -159,10 +159,14 @@ func parseAuthParams(header string) map[string]string {
 	return params
 }
 
-func (c *Client) GetManifest(ctx context.Context, image, reference string) (*http.Response, error) {
+func (c *Client) GetManifest(ctx context.Context, image, reference, acceptHeader string) (*http.Response, error) {
 	url := fmt.Sprintf("https://registry-1.docker.io/v2/%s/manifests/%s", normalizeImageName(image), reference)
 	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	if acceptHeader != "" {
+		req.Header.Set("Accept", acceptHeader)
+	} else {
+		req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	}
 	return c.doRequestWithAuth(ctx, req)
 }
 
