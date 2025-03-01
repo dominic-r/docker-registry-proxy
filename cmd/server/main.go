@@ -83,7 +83,11 @@ func setupRouter(cfg *config.Config, db *gorm.DB, storage storage.Storage, dhCli
 	r.Use(handlers.RateLimitMiddleware(cfg))
 
 	r.HandleFunc("/v2/", handlers.HandleV2Check).Methods("GET")
-	r.PathPrefix("/v2/").Handler(handlers.NewProxyHandler(logger, cfg, storage, dhClient))
+	r.HandleFunc("/v2/_catalog", handlers.HandleCatalog).Methods("GET")
+
+	proxyHandler := handlers.NewProxyHandler(logger, cfg, storage, dhClient)
+	r.PathPrefix("/v2/").Handler(proxyHandler)
+
 	return r
 }
 

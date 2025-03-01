@@ -20,11 +20,6 @@ type RateLimiter struct {
 	lastSeen time.Time
 }
 
-var (
-	clients = make(map[string]*RateLimiter)
-	mu      sync.Mutex
-)
-
 type loggingResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -41,6 +36,11 @@ func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
 	lrw.bytesSent += n
 	return n, err
 }
+
+var (
+	clients = make(map[string]*RateLimiter)
+	mu      sync.Mutex
+)
 
 func LoggingMiddleware(logger *logrus.Logger, db *gorm.DB) func(http.Handler) http.Handler {
 	logEntry := logger.WithField("component", "http_middleware")
@@ -153,9 +153,4 @@ func cleanupClients() {
 
 func init() {
 	go cleanupClients()
-}
-
-func HandleV2Check(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-	w.WriteHeader(http.StatusOK)
 }

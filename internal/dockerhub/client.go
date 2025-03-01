@@ -182,3 +182,9 @@ func normalizeImageName(image string) string {
 	}
 	return image
 }
+
+func (c *Client) GetTags(ctx context.Context, image string) (*http.Response, error) {
+	url := fmt.Sprintf("https://registry-1.docker.io/v2/%s/tags/list", normalizeImageName(image))
+	req, _ := http.NewRequest("GET", url, nil)
+	return c.doRequestWithAuth(ctx, req)
+}
