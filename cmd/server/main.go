@@ -114,19 +114,21 @@ func startCachePurger(ctx context.Context, log *logrus.Logger, db *gorm.DB, stor
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 
-	logger.Info("Starting cache purger")
+	logEntry := log.WithField("component", "cache_purger")
+	logEntry.Info("Starting cache purger")
+
 	for {
 		select {
 		case <-ticker.C:
-			purgeExpiredCache(ctx, logger, db, storage)
+			purgeExpiredCache(ctx, logEntry, db, storage)
 		case <-ctx.Done():
-			logger.Info("Stopping cache purger")
+			logEntry.Info("Stopping cache purger")
 			return
 		}
 	}
 }
 
-func purgeExpiredCache(ctx context.Context, log *logrus.Logger, db *gorm.DB, storage storage.Storage) {
+func purgeExpiredCache(ctx context.Context, log *logrus.Entry, db *gorm.DB, storage storage.Storage) {
 	start := time.Now()
 	log = log.WithField("operation", "cache_purge")
 
